@@ -200,7 +200,7 @@ func ParseConfig() {
 			log.Fatalf(`could not parse the number of authentications to create per resource: %s`, err)
 		}
 
-		EndpointsPerSource = tmp
+		AuthenticationsPerResource = tmp
 	}
 
 	// Initialize the endpoint URLs we will be sending the requests to.
