@@ -18,6 +18,9 @@ const defaultApplicationsPerSource = 10
 // defaultAuthenticationsPerResource is the default number of authentications that will be created per resource.
 const defaultAuthenticationsPerResource = 3
 
+// defaultConcurrentRequests is the default number of requests that the program is allowed to send at the same time.
+const defaultConcurrentRequests = 10
+
 // defaultEndpointsPerSource is the default number of endpoints that will be created per source_types_db.
 const defaultEndpointsPerSource = 10
 
@@ -38,6 +41,9 @@ var ApplicationsPerSource int
 
 // AuthenticationsPerResource is the number of authentications the program will create for each resource.
 var AuthenticationsPerResource int
+
+// ConcurrentRequests is the maximum number of concurrent requests that the program is allowed to send at the same time.
+var ConcurrentRequests chan struct{}
 
 // EndpointsPerSource is the number of endpoints the program will create for each source_types_db.
 var EndpointsPerSource int
@@ -96,6 +102,24 @@ func ParseConfig() {
 	// Build the URL.
 	SourcesApiHealthUrl = fmt.Sprintf("%s:%s/health", sourcesHost, sourcesPort)
 	SourcesApiUrl = fmt.Sprintf("%s:%s/%s", sourcesHost, sourcesPort, sourcesV31Path)
+
+	// Get the maximum number of concurrent requests.
+	concurrentRequests := os.Getenv("CONCURRENT_REQUESTS")
+	if concurrentRequests == "" {
+		ConcurrentRequests = make(chan struct{}, defaultConcurrentRequests)
+	} else {
+		tmp, err := strconv.Atoi(concurrentRequests)
+		if err != nil {
+			log.Fatalf(`could not parse the maximum concurrent requests for the program: %s`, err)
+		}
+
+		if tmp < 1 {
+			log.Printf(`warning: you specified less than 1 concurrent requests: %d. Defaulting to %d`, tmp, defaultConcurrentRequests)
+			ConcurrentRequests = make(chan struct{}, defaultConcurrentRequests)
+		} else {
+			ConcurrentRequests = make(chan struct{}, tmp)
+		}
+	}
 
 	// Get the number of tenants to be created.
 	numberTenants := os.Getenv("NUMBER_OF_TENANTS")
