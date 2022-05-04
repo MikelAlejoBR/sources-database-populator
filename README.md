@@ -1,5 +1,10 @@
 # sources-database-populator
-This utility helps populating the database with dummy data for easier load testing
+This utility helps populating the database with dummy data for easier load testing.
+
+Beware that this program may use high loads of CPU, memory and network sockets at the same time. If you find your
+computer, the back end or Kubernetes struggling to keep up with the simultaneous requests, consider tweaking the
+`CONCURRENT_REQUESTS` environment variable, which controls the number of active requests that this program is allowed
+to send at the same time.
 
 ## Environment variables to run the program
 
@@ -8,6 +13,7 @@ This utility helps populating the database with dummy data for easier load testi
 * `SOURCES_API_PORT`. Example value: `8000`
 
 ### Optional values
+* `CONCURRENT_REQUESTS`. Default value: `10`.
 * `LOG_LEVEL`. One of `debug`, `info`, `warn` or `error`. Default value: `info`.
 * `NUMBER_OF_TENANTS`. Default value: `3`
 * `SOURCES_PER_TENANT`. Default value: `10`

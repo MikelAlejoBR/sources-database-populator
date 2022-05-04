@@ -8,6 +8,8 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MikelAlejoBR/sources-database-populator/config"
@@ -40,19 +42,16 @@ var appCreationWorkflows = [2]string{
 
 // These variables will hold the total count of the created resources.
 var (
-	createdApplicationsTotal    int
-	createdAuthenticationsTotal int
-	createdEndpointsTotal       int
-	createdRhcConnectionsTotal  int
-	createdSourcesTotal         int
+	createdApplicationsTotal    uint64
+	createdAuthenticationsTotal uint64
+	createdEndpointsTotal       uint64
+	createdRhcConnectionsTotal  uint64
+	createdSourcesTotal         uint64
 )
 
 // sourceTypesDb is the access to the in-memory database we will be using to store the different source types,
 // application types and their compatible authorization types.
 var sourceTypesDb = source_types_db.SourceTypesDb{}
-
-// Two seconds is more than enough to receive a response. If we don't receive it, simply kill the connection.
-var httpClient = http.Client{Timeout: 2 * time.Second}
 
 // IdStruct is a helper struct to extract IDs from creation requests.
 type IdStruct struct {
@@ -72,12 +71,38 @@ func main() {
 	// Initialize the in memory database.
 	sourceTypesDb.InitializeDatabase()
 
+	// Before starting, we "initialize" all the tenants. This means that we send some dummy requests to "/sources" so
+	// that the tenants get picked up, and they get created on the database. This avoids hitting the "duplicated
+	// constraint" on the tenants table, which fires up when we send two simultaneous requests which contain a tenant
+	// that has yet to be created in the database.
+	initializeTenants()
+
 	// Get the time before starting the process so that we can calculate the elapsed time afterwards.
 	startTs := time.Now()
 
 	// Start the process.
 	for _, tenant := range config.Tenants {
-		createSource(tenant)
+		var wg sync.WaitGroup
+		for i := 0; i < config.SourcesPerTenant; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				sourceId, sourceTypeId, ok := createSource(tenant)
+				if !ok {
+					return
+				}
+
+				createApplications(tenant, sourceTypeId, sourceId)
+				createAuthenticationsSource(tenant, sourceTypeId, sourceTypeId)
+				createEndpoints(tenant, sourceId)
+				createRhcConnections(tenant, sourceId)
+
+				atomic.AddUint64(&createdSourcesTotal, 1)
+			}()
+		}
+
+		wg.Wait()
 	}
 
 	// Calculate the elapsed time.
@@ -86,11 +111,11 @@ func main() {
 	logger.Logger.Infow(
 		"Statistics - created resources",
 		zap.String("elapsed_time", elapsedTime),
-		zap.Int("created_sources", createdSourcesTotal),
-		zap.Int("created_endpoints", createdEndpointsTotal),
-		zap.Int("created_applications", createdApplicationsTotal),
-		zap.Int("created_authentications", createdAuthenticationsTotal),
-		zap.Int("created_rhc_connections", createdRhcConnectionsTotal),
+		zap.Uint64("created_sources", createdSourcesTotal),
+		zap.Uint64("created_endpoints", createdEndpointsTotal),
+		zap.Uint64("created_applications", createdApplicationsTotal),
+		zap.Uint64("created_authentications", createdAuthenticationsTotal),
+		zap.Uint64("created_rhc_connections", createdRhcConnectionsTotal),
 	)
 
 	// Make sure we flush the buffer from any logs.
@@ -140,6 +165,81 @@ func performHealthCheck() {
 	}
 }
 
+// initializeTenants sends requests to "/sources" so that all the tenants that were generated get created in the back
+// end's database. This ensures that we don't hit the "duplicate tenant" constraint when we send two requests which
+// have a tenant yet to be created in the database.
+func initializeTenants() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, tenant := range config.Tenants {
+		wg.Add(1)
+
+		go func(tenant string) {
+			defer wg.Done()
+
+			// We reuse the "SourceCreateUrl" since we will hit the same endpoint, but with the "GET" verb instead.
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, config.SourceCreateUrl, nil)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not create request for initializing the tenant.",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			req.Header.Add("Accept", "application/json")
+			req.Header.Add("x-rh-identity", tenant)
+
+			logger.Logger.Debugw("Tenant initialization request to be sent", zap.Any("request", req))
+
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not send the tenant initialization request",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			resBody, err := io.ReadAll(res.Body)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not read the tenant's initialization response body",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+			if err = res.Body.Close(); err != nil {
+				logger.Logger.Fatalw(
+					"could not close the tenant's initialization response body",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			if res.StatusCode != http.StatusOK {
+				logger.Logger.Fatalw(
+					"unexpected status code when initializing a tenant",
+					zap.Int("want_status_code", http.StatusOK),
+					zap.Any("response_body", json.RawMessage(resBody)),
+					zap.Int("got_status_code", res.StatusCode),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			logger.Logger.Infow("Tenant initialized", zap.String("tenant", tenant))
+		}(tenant)
+	}
+	wg.Wait()
+}
+
 // getRandomAppCreationWorkflow returns a random app creation workflow.
 func getRandomAppCreationWorkflow() string {
 	idx := rand.Intn(1)
@@ -163,329 +263,376 @@ func getRandomEndpointAvailabilityStatus() string {
 
 // createSource takes a target tenant and creates random sources and sub resources. That is: authentications, endpoints,
 // applications and rhc connections.
-func createSource(tenant string) {
-	for i := 0; i < config.SourcesPerTenant; {
-		st := sourceTypesDb.GetRandomSourceType()
+func createSource(tenant string) (string, string, bool) {
+	st := sourceTypesDb.GetRandomSourceType()
 
-		uid, err := uuid.NewUUID()
-		if err != nil {
-			logger.Logger.Errorw(`could not generate UUID when generating a source. Skipping...`, zap.Error(err))
-			continue
-		}
+	uid, err := uuid.NewUUID()
+	if err != nil {
+		logger.Logger.Errorw(`could not generate UUID when generating a source. Skipping...`, zap.Error(err))
+		return "", "", false
+	}
 
-		name := fmt.Sprintf("%s-name", uid)
-		uidStr := uid.String()
-		source := model.SourceCreateRequest{
-			Name:                &name,
-			Uid:                 &uidStr,
-			AppCreationWorkflow: getRandomAppCreationWorkflow(),
-			AvailabilityStatus:  getRandomAvailabilityStatus(),
-			SourceTypeIDRaw:     st.Id,
-		}
+	name := fmt.Sprintf("%s-name", uid)
+	uidStr := uid.String()
+	source := model.SourceCreateRequest{
+		Name:                &name,
+		Uid:                 &uidStr,
+		AppCreationWorkflow: getRandomAppCreationWorkflow(),
+		AvailabilityStatus:  getRandomAvailabilityStatus(),
+		SourceTypeIDRaw:     st.Id,
+	}
 
-		body, err := json.Marshal(source)
-		if err != nil {
-			logger.Logger.Errorw(
-				`could not marshal "SourceCreateRequest" into JSON. Skipping...`,
-				zap.Error(err),
-				zap.Any("source_create_request", source),
-			)
-			continue
-		}
+	body, err := json.Marshal(source)
+	if err != nil {
+		logger.Logger.Errorw(
+			`could not marshal "SourceCreateRequest" into JSON. Skipping...`,
+			zap.Error(err),
+			zap.Any("source_create_request", source),
+		)
+		return "", "", false
+	}
 
-		resBody, isSuccess := sendCreationRequest("source", tenant, config.SourceCreateUrl, body)
-		if !isSuccess {
-			continue
-		}
+	resBody, isSuccess := sendCreationRequest("source", tenant, config.SourceCreateUrl, body)
+	if !isSuccess {
+		return "", "", false
+	}
 
-		var sourceId IdStruct
-		err = json.Unmarshal(resBody, &sourceId)
-		if err != nil {
-			logger.Logger.Errorw(
-				"could not extract ID from source creation response. Can not create subresources, skipping...",
-				zap.Error(err),
-				zap.String("tenant", tenant),
-				zap.Any("request_body", json.RawMessage(body)),
-				zap.Any("response_body", json.RawMessage(resBody)),
-			)
-			continue
-		}
-
-		logger.Logger.Debugw(
-			"Source created",
+	var sourceId IdStruct
+	err = json.Unmarshal(resBody, &sourceId)
+	if err != nil {
+		logger.Logger.Errorw(
+			"could not extract ID from source creation response. Can not create subresources, skipping...",
+			zap.Error(err),
 			zap.String("tenant", tenant),
+			zap.Any("request_body", json.RawMessage(body)),
 			zap.Any("response_body", json.RawMessage(resBody)),
 		)
-		logger.Logger.Infow(
-			"Source created",
-			zap.String("id", sourceId.Id),
-		)
-
-		createAuthenticationsSource(tenant, st.Id, sourceId.Id)
-		createApplications(tenant, st.Id, sourceId.Id)
-		createEndpoints(tenant, sourceId.Id)
-		createRhcConnections(tenant, sourceId.Id)
-
-		createdSourcesTotal++
-		i++
+		return "", "", false
 	}
+
+	logger.Logger.Debugw(
+		"Source created",
+		zap.String("tenant", tenant),
+		zap.Any("response_body", json.RawMessage(resBody)),
+	)
+	logger.Logger.Infow(
+		"Source created",
+		zap.String("id", sourceId.Id),
+	)
+
+	return sourceId.Id, st.Id, true
 }
 
 // createRhcConnections creates rhc connections related to the given source.
 func createRhcConnections(tenant string, sourceId string) {
-	for i := 0; i < config.RhcConnectionsPerTenant; {
-		uid, err := uuid.NewUUID()
-		if err != nil {
-			logger.Logger.Errorw("could not generate UUID when generating a rhc connection. Skipping...", zap.Error(err))
-			continue
-		}
+	var wg sync.WaitGroup
 
-		rhcConnection := model.RhcConnectionCreateRequest{
-			RhcId:       uid.String(),
-			SourceIdRaw: sourceId,
-		}
+	for i := 0; i < config.RhcConnectionsPerTenant; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 
-		body, err := json.Marshal(rhcConnection)
-		if err != nil {
-			logger.Logger.Errorw(
-				`could not marshal "RhcConnectionCreateRequest" into JSON. Skipping...`,
-				zap.Error(err),
-				zap.Any("rhc_connection_create_request", rhcConnection),
-			)
-			continue
-		}
+			uid, err := uuid.NewUUID()
+			if err != nil {
+				logger.Logger.Errorw("could not generate UUID when generating a rhc connection. Skipping...", zap.Error(err))
+				return
+			}
 
-		resBody, isSuccess := sendCreationRequest("rhcConnection", tenant, config.RhcConnectionCreateUrl, body)
-		if !isSuccess {
-			continue
-		}
+			rhcConnection := model.RhcConnectionCreateRequest{
+				RhcId:       uid.String(),
+				SourceIdRaw: sourceId,
+			}
 
-		var rhcConnectionId IdStruct
-		err = json.Unmarshal(resBody, &rhcConnectionId)
-		if err != nil {
-			logger.Logger.Errorw(
-				"could not extract ID from rhc connection creation response. Skipping...",
-				zap.Error(err),
+			body, err := json.Marshal(rhcConnection)
+			if err != nil {
+				logger.Logger.Errorw(
+					`could not marshal "RhcConnectionCreateRequest" into JSON. Skipping...`,
+					zap.Error(err),
+					zap.Any("rhc_connection_create_request", rhcConnection),
+				)
+				return
+			}
+
+			resBody, isSuccess := sendCreationRequest("rhcConnection", tenant, config.RhcConnectionCreateUrl, body)
+			if !isSuccess {
+				return
+			}
+
+			var rhcConnectionId IdStruct
+			err = json.Unmarshal(resBody, &rhcConnectionId)
+			if err != nil {
+				logger.Logger.Errorw(
+					"could not extract ID from rhc connection creation response. Skipping...",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.Any("request_body", json.RawMessage(body)),
+					zap.Any("response_body", json.RawMessage(resBody)),
+				)
+				return
+			}
+
+			logger.Logger.Debugw(
+				"RHC Connection created",
 				zap.String("tenant", tenant),
-				zap.Any("request_body", json.RawMessage(body)),
 				zap.Any("response_body", json.RawMessage(resBody)),
 			)
-			continue
-		}
+			logger.Logger.Infow(
+				"RHC connection created",
+				zap.String("id", rhcConnectionId.Id),
+			)
 
-		logger.Logger.Debugw(
-			"RHC Connection created",
-			zap.String("tenant", tenant),
-			zap.Any("response_body", json.RawMessage(resBody)),
-		)
-		logger.Logger.Infow(
-			"RHC connection created",
-			zap.String("id", rhcConnectionId.Id),
-		)
-
-		createdRhcConnectionsTotal++
-		i++
+			atomic.AddUint64(&createdRhcConnectionsTotal, 1)
+		}()
 	}
+
+	wg.Wait()
 }
 
 // createEndpoints creates the endpoints related to the given source.
 func createEndpoints(tenant string, sourceId string) {
-	for i := 0; i < config.EndpointsPerSource; {
-		uid, err := uuid.NewUUID()
-		if err != nil {
-			logger.Logger.Errorw(`could not generate UUID when generating an endpoint. Skipping...`, zap.Error(err))
-			continue
-		}
+	var wg sync.WaitGroup
+	for i := 0; i < config.EndpointsPerSource; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 
-		endpoint := model.EndpointCreateRequest{
-			AvailabilityStatus: getRandomEndpointAvailabilityStatus(),
-			Host:               fmt.Sprintf("source-%s.com", sourceId),
-			Path:               fmt.Sprintf("/source-%s", sourceId),
-			Role:               uid.String(),
-			SourceIDRaw:        sourceId,
-		}
+			uid, err := uuid.NewUUID()
+			if err != nil {
+				logger.Logger.Errorw(`could not generate UUID when generating an endpoint. Skipping...`, zap.Error(err))
+				return
+			}
 
-		body, err := json.Marshal(endpoint)
-		if err != nil {
-			logger.Logger.Errorw(
-				`could not marshal "EndpointCreateRequest" into JSON. Skipping...`,
-				zap.Error(err),
-				zap.Any("endpoint_create_request", endpoint),
-			)
-			continue
-		}
+			endpoint := model.EndpointCreateRequest{
+				AvailabilityStatus: getRandomEndpointAvailabilityStatus(),
+				Host:               fmt.Sprintf("source-%s.com", sourceId),
+				Path:               fmt.Sprintf("/source-%s", sourceId),
+				Role:               uid.String(),
+				SourceIDRaw:        sourceId,
+			}
 
-		resBody, isSuccess := sendCreationRequest("endpoint", tenant, config.EndpointCreateUrl, body)
-		if !isSuccess {
-			continue
-		}
+			body, err := json.Marshal(endpoint)
+			if err != nil {
+				logger.Logger.Errorw(
+					`could not marshal "EndpointCreateRequest" into JSON. Skipping...`,
+					zap.Error(err),
+					zap.Any("endpoint_create_request", endpoint),
+				)
+				return
+			}
 
-		var endpointId IdStruct
-		err = json.Unmarshal(resBody, &endpointId)
-		if err != nil {
-			logger.Logger.Errorw(
-				"could not extract ID from endpoint creation response. Skipping...",
-				zap.Error(err),
+			resBody, isSuccess := sendCreationRequest("endpoint", tenant, config.EndpointCreateUrl, body)
+			if !isSuccess {
+				return
+			}
+
+			var endpointId IdStruct
+			err = json.Unmarshal(resBody, &endpointId)
+			if err != nil {
+				logger.Logger.Errorw(
+					"could not extract ID from endpoint creation response. Skipping...",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.Any("request_body", json.RawMessage(body)),
+					zap.Any("response_body", json.RawMessage(resBody)),
+				)
+				return
+			}
+
+			logger.Logger.Debugw(
+				"Endpoint created",
 				zap.String("tenant", tenant),
-				zap.Any("request_body", json.RawMessage(body)),
+				zap.String("source_id", sourceId),
 				zap.Any("response_body", json.RawMessage(resBody)),
 			)
-			continue
-		}
+			logger.Logger.Infow(
+				"Endpoint created",
+				zap.String("id", endpointId.Id),
+			)
 
-		logger.Logger.Debugw(
-			"Endpoint created",
-			zap.String("tenant", tenant),
-			zap.String("source_id", sourceId),
-			zap.Any("response_body", json.RawMessage(resBody)),
-		)
-		logger.Logger.Infow(
-			"Endpoint created",
-			zap.String("id", endpointId.Id),
-		)
-
-		createdEndpointsTotal++
-		i++
+			atomic.AddUint64(&createdEndpointsTotal, 1)
+		}()
 	}
+
+	wg.Wait()
 }
 
 // createAuthenticationsSource creates authentications for the given source. It makes sure to create compatible
 // authentications for that source.
 func createAuthenticationsSource(tenant string, sourceTypeId string, sourceId string) {
-	authType := sourceTypesDb.GetRandomAuthenticationTypeForSource(sourceTypeId)
+	var wg sync.WaitGroup
+	for i := 0; i < config.AuthenticationsPerResource; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 
-	createAuthentications(tenant, authType, "Source", sourceId)
+			authType := sourceTypesDb.GetRandomAuthenticationTypeForSource(sourceTypeId)
+
+			isSuccess := createAuthentications(tenant, authType, "Source", sourceId)
+			if !isSuccess {
+				return
+			}
+
+			atomic.AddUint64(&createdAuthenticationsTotal, 1)
+		}()
+	}
+
+	wg.Wait()
 }
 
 // createAuthenticationsApplication creates authentications for the given application. It makes sure to create
 // authentications that are compatible with the application in the given source.
 func createAuthenticationsApplication(tenant string, sourceTypeId string, applicationTypeId, applicationId string) {
-	authType := sourceTypesDb.GetRandomAuthenticationTypeForApplication(sourceTypeId, applicationTypeId)
+	var wg sync.WaitGroup
+	for i := 0; i < config.AuthenticationsPerResource; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 
-	createAuthentications(tenant, authType, "Application", applicationId)
+			authType := sourceTypesDb.GetRandomAuthenticationTypeForApplication(sourceTypeId, applicationTypeId)
+
+			isSuccess := createAuthentications(tenant, authType, "Application", applicationId)
+			if !isSuccess {
+				return
+			}
+
+			atomic.AddUint64(&createdAuthenticationsTotal, 1)
+		}()
+	}
+
+	wg.Wait()
 }
 
 // createAuthentications is a generic function which creates authentications for the specified resource type and
 // resource id.
-func createAuthentications(tenant string, authType string, resourceType string, resourceId string) {
-	for i := 0; i < config.AuthenticationsPerResource; {
-		uid, err := uuid.NewUUID()
-		if err != nil {
-			logger.Logger.Errorw("could not generate UUID when generating an authentication. Skipping...", zap.Error(err))
-			continue
-		}
-
-		name := fmt.Sprintf("%s-name", uid)
-		username := fmt.Sprintf("%s-username", uid)
-		password := fmt.Sprintf("%s-password", uid)
-		authentication := model.AuthenticationCreateRequest{
-			AuthType:      authType,
-			Name:          &name,
-			Password:      &password,
-			ResourceType:  resourceType,
-			ResourceIDRaw: resourceId,
-			Username:      &username,
-		}
-
-		body, err := json.Marshal(authentication)
-		if err != nil {
-			logger.Logger.Errorw(
-				`could not marshal "AuthenticationCreateRequest" into JSON. Skipping...`,
-				zap.Error(err),
-				zap.Any("authentication_create_request", authentication),
-			)
-			continue
-		}
-
-		resBody, isSuccess := sendCreationRequest("authentication", tenant, config.AuthenticationCreateUrl, body)
-		if !isSuccess {
-			continue
-		}
-
-		var authenticationId IdStruct
-		err = json.Unmarshal(resBody, &authenticationId)
-		if err != nil {
-			logger.Logger.Errorw(
-				"could not extract ID from authentication creation response. Skipping...",
-				zap.Error(err),
-				zap.String("tenant", tenant),
-				zap.Any("request_body", json.RawMessage(body)),
-				zap.Any("response_body", json.RawMessage(resBody)),
-			)
-			continue
-		}
-
-		logger.Logger.Debugw(
-			"Authentication creation's response body",
-			zap.String("tenant_id", tenant),
-			zap.Any("response_body", resBody),
-		)
-		logger.Logger.Infow(
-			"Authentication created",
-			zap.String("authentication_id", authenticationId.Id),
-		)
-
-		createdAuthenticationsTotal++
-		i++
+func createAuthentications(tenant string, authType string, resourceType string, resourceId string) bool {
+	uid, err := uuid.NewUUID()
+	if err != nil {
+		logger.Logger.Errorw("could not generate UUID when generating an authentication. Skipping...", zap.Error(err))
+		return false
 	}
-}
 
-// createApplications creates the applications and its authentications which are compatible with the provided source.
-func createApplications(tenant string, sourceTypeId string, sourceId string) {
-	for i := 0; i < config.ApplicationsPerSource; {
-		appType := sourceTypesDb.GetRandomApplicationType(sourceTypeId)
+	name := fmt.Sprintf("%s-name", uid)
+	username := fmt.Sprintf("%s-username", uid)
+	password := fmt.Sprintf("%s-password", uid)
+	authentication := model.AuthenticationCreateRequest{
+		AuthType:      authType,
+		Name:          &name,
+		Password:      &password,
+		ResourceType:  resourceType,
+		ResourceIDRaw: resourceId,
+		Username:      &username,
+	}
 
-		application := model.ApplicationCreateRequest{
-			ApplicationTypeIDRaw: appType.Id,
-			SourceIDRaw:          sourceId,
-		}
+	body, err := json.Marshal(authentication)
+	if err != nil {
+		logger.Logger.Errorw(
+			`could not marshal "AuthenticationCreateRequest" into JSON. Skipping...`,
+			zap.Error(err),
+			zap.Any("authentication_create_request", authentication),
+		)
+		return false
+	}
 
-		body, err := json.Marshal(application)
-		if err != nil {
-			logger.Logger.Errorw(
-				`could not marshal "ApplicationCreateRequest" into JSON. Skipping...`,
-				zap.Error(err),
-				zap.Any("application_create_request", application),
-			)
-			continue
-		}
+	resBody, isSuccess := sendCreationRequest("authentication", tenant, config.AuthenticationCreateUrl, body)
+	if !isSuccess {
+		return false
+	}
 
-		resBody, isSuccess := sendCreationRequest("application", tenant, config.ApplicationCreateUrl, body)
-		if !isSuccess {
-			continue
-		}
-
-		var applicationId IdStruct
-		err = json.Unmarshal(resBody, &applicationId)
-		if err != nil {
-			logger.Logger.Errorw(
-				"could not extract ID from application creation response. Can not create authentications, skipping...",
-				zap.Error(err),
-				zap.Any("response_body", json.RawMessage(resBody)),
-			)
-			continue
-		}
-
-		logger.Logger.Debugw(
-			"Application creation's response body",
-			zap.String("tenant_id", tenant),
-			zap.String("source_id", sourceId),
+	var authenticationId IdStruct
+	err = json.Unmarshal(resBody, &authenticationId)
+	if err != nil {
+		logger.Logger.Errorw(
+			"could not extract ID from authentication creation response. Skipping...",
+			zap.Error(err),
+			zap.String("tenant", tenant),
+			zap.Any("request_body", json.RawMessage(body)),
 			zap.Any("response_body", json.RawMessage(resBody)),
 		)
-		logger.Logger.Infow(
-			"Application created",
-			zap.String("application_id", applicationId.Id),
-		)
-
-		createAuthenticationsApplication(tenant, sourceTypeId, appType.Id, applicationId.Id)
-
-		createdApplicationsTotal++
-		i++
+		return false
 	}
+
+	logger.Logger.Debugw(
+		"Authentication creation's response body",
+		zap.String("tenant_id", tenant),
+		zap.Any("response_body", resBody),
+	)
+	logger.Logger.Infow(
+		"Authentication created",
+		zap.String("authentication_id", authenticationId.Id),
+	)
+
+	return true
+}
+
+// createApplications creates the application and its authentications which are compatible with the provided source.
+func createApplications(tenant string, sourceTypeId string, sourceId string) {
+	var wg sync.WaitGroup
+	for i := 0; i < config.ApplicationsPerSource; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			appType := sourceTypesDb.GetRandomApplicationType(sourceTypeId)
+
+			application := model.ApplicationCreateRequest{
+				ApplicationTypeIDRaw: appType.Id,
+				SourceIDRaw:          sourceId,
+			}
+
+			body, err := json.Marshal(application)
+			if err != nil {
+				logger.Logger.Errorw(
+					`could not marshal "ApplicationCreateRequest" into JSON. Skipping...`,
+					zap.Error(err),
+					zap.Any("application_create_request", application),
+				)
+				return
+			}
+
+			resBody, isSuccess := sendCreationRequest("application", tenant, config.ApplicationCreateUrl, body)
+			if !isSuccess {
+				return
+			}
+
+			var applicationId IdStruct
+			err = json.Unmarshal(resBody, &applicationId)
+			if err != nil {
+				logger.Logger.Errorw(
+					"could not extract ID from application creation response. Can not create authentications, skipping...",
+					zap.Error(err),
+					zap.Any("response_body", json.RawMessage(resBody)),
+				)
+				return
+			}
+
+			logger.Logger.Debugw(
+				"Application creation's response body",
+				zap.String("tenant_id", tenant),
+				zap.String("source_id", sourceId),
+				zap.Any("response_body", json.RawMessage(resBody)),
+			)
+			logger.Logger.Infow(
+				"Application created",
+				zap.String("application_id", applicationId.Id),
+			)
+
+			atomic.AddUint64(&createdApplicationsTotal, 1)
+
+			go createAuthenticationsApplication(tenant, sourceTypeId, appType.Id, applicationId.Id)
+		}()
+	}
+
+	wg.Wait()
 }
 
 // sendCreationRequest is a generic function which sends a resource creation request to the back end.
 func sendCreationRequest(resourceType string, tenant string, url string, body []byte) ([]byte, bool) {
+	// We use a channel as the throttler for the number of simultaneous requests. Each new process will write to the
+	// channel, "allocating a slot" to perform the request. Once the request is done, the process will read from the
+	// channel, "freeing the slot" so that other processes can perform their requests. If the channel is full of
+	// values, the process will block here until some other process frees a slot.
+	config.ConcurrentRequests <- struct{}{}
+
 	logger.Logger.Debugw(
 		"Request parameters for the creation request",
 		zap.String("resource_type", resourceType),
@@ -494,7 +641,10 @@ func sendCreationRequest(resourceType string, tenant string, url string, body []
 		zap.Any("body", json.RawMessage(body)),
 	)
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
 		logger.Logger.Errorw(
 			"could not create request for the resource creation. Skipping...",
@@ -504,6 +654,8 @@ func sendCreationRequest(resourceType string, tenant string, url string, body []
 			zap.String("url", url),
 			zap.Any("body", json.RawMessage(body)),
 		)
+
+		<-config.ConcurrentRequests
 		return nil, false
 	}
 
@@ -512,7 +664,7 @@ func sendCreationRequest(resourceType string, tenant string, url string, body []
 
 	logger.Logger.Debugw("Request to be sent", zap.Any("request", req))
 
-	res, err := httpClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		logger.Logger.Errorw(
 			"could not send the creation request. Skipping...",
@@ -522,8 +674,13 @@ func sendCreationRequest(resourceType string, tenant string, url string, body []
 			zap.String("url", url),
 			zap.Any("body", json.RawMessage(body)),
 		)
+
+		<-config.ConcurrentRequests
 		return nil, false
 	}
+
+	// Request is done, we can free one slot in the channel.
+	<-config.ConcurrentRequests
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {
