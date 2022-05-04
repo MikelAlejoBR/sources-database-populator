@@ -106,7 +106,7 @@ func main() {
 	}
 
 	// Calculate the elapsed time.
-	elapsedTime := time.Now().Sub(startTs).String()
+	elapsedTime := time.Since(startTs).String()
 
 	logger.Logger.Infow(
 		"Statistics - created resources",
