@@ -18,8 +18,6 @@ func InitializeLogger() {
 	switch config.LogLevel {
 	case "error":
 		atomicLogLevel = zap.NewAtomicLevelAt(zap.ErrorLevel)
-	case "warn":
-		atomicLogLevel = zap.NewAtomicLevelAt(zap.WarnLevel)
 	case "debug":
 		atomicLogLevel = zap.NewAtomicLevelAt(zap.DebugLevel)
 	case "info":
