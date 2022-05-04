@@ -14,7 +14,7 @@ to send at the same time.
 
 ### Optional values
 * `CONCURRENT_REQUESTS`. Default value: `10`.
-* `LOG_LEVEL`. One of `debug`, `info`, `warn` or `error`. Default value: `info`.
+* `LOG_LEVEL`. One of `debug`, `info` or `error`. Default value: `info`.
 * `NUMBER_OF_TENANTS`. Default value: `3`
 * `SOURCES_PER_TENANT`. Default value: `10`
 * `RHC_CONNECTIONS_PER_TENANT`. Default value: `10`
