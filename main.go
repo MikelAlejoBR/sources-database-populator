@@ -71,6 +71,12 @@ func main() {
 	// Initialize the in memory database.
 	sourceTypesDb.InitializeDatabase()
 
+	// Before starting, we "initialize" all the tenants. This means that we send some dummy requests to "/sources" so
+	// that the tenants get picked up, and they get created on the database. This avoids hitting the "duplicated
+	// constraint" on the tenants table, which fires up when we send two simultaneous requests which contain a tenant
+	// that has yet to be created in the database.
+	initializeTenants()
+
 	// Get the time before starting the process so that we can calculate the elapsed time afterwards.
 	startTs := time.Now()
 
@@ -157,6 +163,81 @@ func performHealthCheck() {
 			zap.Int("got_status-code", res.StatusCode),
 		)
 	}
+}
+
+// initializeTenants sends requests to "/sources" so that all the tenants that were generated get created in the back
+// end's database. This ensures that we don't hit the "duplicate tenant" constraint when we send two requests which
+// have a tenant yet to be created in the database.
+func initializeTenants() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, tenant := range config.Tenants {
+		wg.Add(1)
+
+		go func(tenant string) {
+			defer wg.Done()
+
+			// We reuse the "SourceCreateUrl" since we will hit the same endpoint, but with the "GET" verb instead.
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, config.SourceCreateUrl, nil)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not create request for initializing the tenant.",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			req.Header.Add("Accept", "application/json")
+			req.Header.Add("x-rh-identity", tenant)
+
+			logger.Logger.Debugw("Tenant initialization request to be sent", zap.Any("request", req))
+
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not send the tenant initialization request",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			resBody, err := io.ReadAll(res.Body)
+			if err != nil {
+				logger.Logger.Fatalw(
+					"could not read the tenant's initialization response body",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+			if err = res.Body.Close(); err != nil {
+				logger.Logger.Fatalw(
+					"could not close the tenant's initialization response body",
+					zap.Error(err),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			if res.StatusCode != http.StatusOK {
+				logger.Logger.Fatalw(
+					"unexpected status code when initializing a tenant",
+					zap.Int("want_status_code", http.StatusOK),
+					zap.Any("response_body", json.RawMessage(resBody)),
+					zap.Int("got_status_code", res.StatusCode),
+					zap.String("tenant", tenant),
+					zap.String("url", config.SourceCreateUrl),
+				)
+			}
+
+			logger.Logger.Infow("Tenant initialized", zap.String("tenant", tenant))
+		}(tenant)
+	}
+	wg.Wait()
 }
 
 // getRandomAppCreationWorkflow returns a random app creation workflow.
