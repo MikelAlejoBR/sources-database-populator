@@ -108,15 +108,39 @@ func main() {
 	// Calculate the elapsed time.
 	elapsedTime := time.Since(startTs).String()
 
-	logger.Logger.Infow(
-		"Statistics - created resources",
-		zap.String("elapsed_time", elapsedTime),
-		zap.Uint64("created_sources", createdSourcesTotal),
-		zap.Uint64("created_endpoints", createdEndpointsTotal),
-		zap.Uint64("created_applications", createdApplicationsTotal),
-		zap.Uint64("created_authentications", createdAuthenticationsTotal),
-		zap.Uint64("created_rhc_connections", createdRhcConnectionsTotal),
-	)
+	// Store the information in a map.
+	results := map[string]interface{}{
+		"elapsed_time":            elapsedTime,
+		"created_tenants":         config.Tenants,
+		"created_sources":         createdSourcesTotal,
+		"created_endpoints":       createdEndpointsTotal,
+		"created_applications":    createdApplicationsTotal,
+		"created_authentications": createdAuthenticationsTotal,
+		"created_rhc_connections": createdRhcConnectionsTotal,
+	}
+
+	// We don't want to use the logger here, since the user could end up shadowing the message depending on the log
+	// level that they decide to use. And to be fair, the statistics should be an "info" message, but again, if the
+	// user decides to log only the "error" messages, they would not be able to see which tenants they have to query
+	// with to be able to play with the data.
+	//
+	// In the case of not being able to "pretty print" the results in JSON format, we log the error, print the results
+	// with the logger anyway.
+	result, err := json.Marshal(results)
+	if err == nil {
+		fmt.Println(string(result))
+	} else {
+		logger.Logger.Errorw(
+			"Could not format the results to JSON. Printing it on this log message",
+			zap.Error(err),
+			zap.String("elapsed_time", elapsedTime),
+			zap.Uint64("created_sources", createdSourcesTotal),
+			zap.Uint64("created_endpoints", createdEndpointsTotal),
+			zap.Uint64("created_applications", createdApplicationsTotal),
+			zap.Uint64("created_authentications", createdAuthenticationsTotal),
+			zap.Uint64("created_rhc_connections", createdRhcConnectionsTotal),
+		)
+	}
 
 	// Make sure we flush the buffer from any logs.
 	logger.FlushLoggingBuffer()
