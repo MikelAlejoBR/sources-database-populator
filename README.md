@@ -27,4 +27,5 @@ to send at the same time.
 | `APPLICATIONS_PER_SOURCE`      | 10            |
 | `ENDPOINTS_PER_SOURCE`         | 10            |
 | `AUTHENTICATIONS_PER_RESOURCE` | 3             |
+
 _**Note**: the log level can be one of "debug", "info" or "error"._
