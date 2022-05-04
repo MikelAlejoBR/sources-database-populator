@@ -1,6 +1,12 @@
 # sources-database-populator
 This utility helps populating the database with dummy data for easier load testing.
 
+The tool generates the minimum required data for an entity to be created, and that data usually is seeded from a
+generated UUID that is utilized on every possible field. In addition to this, the entities are created in a way that
+"make sense for sources". For example, there are sources that only support certain types of applications, and in turn,
+those applications need to have authentications that are compatible both with the application and the parent source.
+In these cases the tool attempts to generate data that doesn't break this expected integrity.
+
 Beware that this program may use high loads of CPU, memory and network sockets at the same time. If you find your
 computer, the back end or Kubernetes struggling to keep up with the simultaneous requests, consider tweaking the
 `CONCURRENT_REQUESTS` environment variable, which controls the number of active requests that this program is allowed
