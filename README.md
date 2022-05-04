@@ -8,16 +8,23 @@ to send at the same time.
 
 ## Environment variables to run the program
 
-### Required values
-* `SOURCES_API_HOST`. Example value: `http://localhost`
-* `SOURCES_API_PORT`. Example value: `8000`
+### Required environment variables
 
-### Optional values
-* `CONCURRENT_REQUESTS`. Default value: `10`.
-* `LOG_LEVEL`. One of `debug`, `info` or `error`. Default value: `info`.
-* `NUMBER_OF_TENANTS`. Default value: `3`
-* `SOURCES_PER_TENANT`. Default value: `10`
-* `RHC_CONNECTIONS_PER_TENANT`. Default value: `10`
-* `APPLICATIONS_PER_SOURCE`. Default value: `10`
-* `ENDPOINTS_PER_SOURCE`. Default value: `10`
-* `AUTHENTICATIONS_PER_RESOURCE`. Default value: `3`
+| Environment variable | Example value      |
+|:--------------------:|:------------------:|
+| `SOURCES_API_HOST`   | `http://localhost` |
+| `SOURCES_API_PORT`   | 8000               |
+
+### Optional environment variables
+
+| Environment variable           | Default value |
+|:------------------------------:|:-------------:|
+| `CONCURRENT_REQUESTS`          | 10            |
+| `LOG_LEVEL`                    | info          |
+| `NUMBER_OF_TENANTS`            | 3             |
+| `SOURCES_PER_TENANT`           | 10            |
+| `RHC_CONNECTIONS_PER_TENANT`   | 10            |
+| `APPLICATIONS_PER_SOURCE`      | 10            |
+| `ENDPOINTS_PER_SOURCE`         | 10            |
+| `AUTHENTICATIONS_PER_RESOURCE` | 3             |
+_**Note**: the log level can be one of "debug", "info" or "error"._
