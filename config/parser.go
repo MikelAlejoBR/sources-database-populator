@@ -36,9 +36,6 @@ const defaultTenants = 3
 // sourcesV31Path is the path to the latest API version.
 const sourcesV31Path = "api/sources/v3.1"
 
-// ApplicationsPerSource is the number of applications the program will create for each source_types_db.
-var ApplicationsPerSource int
-
 // AuthenticationsPerResource is the number of authentications the program will create for each resource.
 var AuthenticationsPerResource int
 
@@ -187,19 +184,6 @@ func ParseConfig() {
 		}
 
 		RhcConnectionsPerTenant = tmp
-	}
-
-	// Get the applications to create per source_types_db.
-	applicationsPerSource := os.Getenv("APPLICATIONS_PER_SOURCE")
-	if applicationsPerSource == "" {
-		ApplicationsPerSource = defaultApplicationsPerSource
-	} else {
-		tmp, err := strconv.Atoi(applicationsPerSource)
-		if err != nil {
-			log.Fatalf(`could not parse the number of applications to create per source_types_db: %s`, err)
-		}
-
-		ApplicationsPerSource = tmp
 	}
 
 	// Get the endpoints to create per source_types_db.

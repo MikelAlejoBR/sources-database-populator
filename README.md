@@ -30,7 +30,6 @@ to send at the same time.
 | `NUMBER_OF_TENANTS`            | 3             |
 | `SOURCES_PER_TENANT`           | 10            |
 | `RHC_CONNECTIONS_PER_TENANT`   | 10            |
-| `APPLICATIONS_PER_SOURCE`      | 10            |
 | `ENDPOINTS_PER_SOURCE`         | 10            |
 | `AUTHENTICATIONS_PER_RESOURCE` | 3             |
 
