@@ -94,7 +94,7 @@ func main() {
 				}
 
 				createApplications(tenant, sourceTypeId, sourceId)
-				createAuthenticationsSource(tenant, sourceTypeId, sourceTypeId)
+				createAuthenticationsSource(tenant, sourceTypeId, sourceId)
 				createEndpoints(tenant, sourceId)
 				createRhcConnections(tenant, sourceId)
 
@@ -590,63 +590,55 @@ func createAuthentications(tenant string, authType string, resourceType string, 
 
 // createApplications creates the application and its authentications which are compatible with the provided source.
 func createApplications(tenant string, sourceTypeId string, sourceId string) {
-	var wg sync.WaitGroup
-	for i := 0; i < config.ApplicationsPerSource; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	// We don't run the application type creation code on multiple threads because there are just a few application
+	// types per source, and doing it synchronously is fast enough. Plus, we avoid
+	for _, appType := range sourceTypesDb.GetApplicationTypes(sourceTypeId) {
+		application := model.ApplicationCreateRequest{
+			ApplicationTypeIDRaw: appType.Id,
+			SourceIDRaw:          sourceId,
+		}
 
-			appType := sourceTypesDb.GetRandomApplicationType(sourceTypeId)
+		body, err := json.Marshal(application)
+		if err != nil {
+			logger.Logger.Errorw(
+				`could not marshal "ApplicationCreateRequest" into JSON. Skipping...`,
+				zap.Error(err),
+				zap.Any("application_create_request", application),
+			)
+			return
+		}
 
-			application := model.ApplicationCreateRequest{
-				ApplicationTypeIDRaw: appType.Id,
-				SourceIDRaw:          sourceId,
-			}
+		resBody, isSuccess := sendCreationRequest("application", tenant, config.ApplicationCreateUrl, body)
+		if !isSuccess {
+			return
+		}
 
-			body, err := json.Marshal(application)
-			if err != nil {
-				logger.Logger.Errorw(
-					`could not marshal "ApplicationCreateRequest" into JSON. Skipping...`,
-					zap.Error(err),
-					zap.Any("application_create_request", application),
-				)
-				return
-			}
-
-			resBody, isSuccess := sendCreationRequest("application", tenant, config.ApplicationCreateUrl, body)
-			if !isSuccess {
-				return
-			}
-
-			var applicationId IdStruct
-			err = json.Unmarshal(resBody, &applicationId)
-			if err != nil {
-				logger.Logger.Errorw(
-					"could not extract ID from application creation response. Can not create authentications, skipping...",
-					zap.Error(err),
-					zap.Any("response_body", json.RawMessage(resBody)),
-				)
-				return
-			}
-
-			logger.Logger.Debugw(
-				"Application creation's response body",
-				zap.String("tenant_id", tenant),
-				zap.String("source_id", sourceId),
+		var applicationId IdStruct
+		err = json.Unmarshal(resBody, &applicationId)
+		if err != nil {
+			logger.Logger.Errorw(
+				"could not extract ID from application creation response. Can not create authentications, skipping...",
+				zap.Error(err),
 				zap.Any("response_body", json.RawMessage(resBody)),
 			)
-			logger.Logger.Infow(
-				"Application created",
-				zap.String("application_id", applicationId.Id),
-			)
+			return
+		}
 
-			atomic.AddUint64(&createdApplicationsTotal, 1)
+		logger.Logger.Debugw(
+			"Application creation's response body",
+			zap.String("tenant_id", tenant),
+			zap.String("source_id", sourceId),
+			zap.Any("response_body", json.RawMessage(resBody)),
+		)
+		logger.Logger.Infow(
+			"Application created",
+			zap.String("application_id", applicationId.Id),
+		)
 
-			go createAuthenticationsApplication(tenant, sourceTypeId, appType.Id, applicationId.Id)
-		}()
+		atomic.AddUint64(&createdApplicationsTotal, 1)
+
+		go createAuthenticationsApplication(tenant, sourceTypeId, appType.Id, applicationId.Id)
 	}
-
-	wg.Wait()
 }
 
 // sendCreationRequest is a generic function which sends a resource creation request to the back end.

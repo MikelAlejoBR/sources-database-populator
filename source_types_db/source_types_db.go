@@ -127,8 +127,8 @@ func (sdb SourceTypesDb) GetRandomAuthenticationTypeForSource(sourceTypeId strin
 	return st.CompatibleAuthentications[idx]
 }
 
-// GetRandomApplicationType gets a random application type that is compatible with the provided source type id.
-func (sdb SourceTypesDb) GetRandomApplicationType(sourceTypeId string) ApplicationType {
+// GetApplicationTypes returns the list of the compatible application types for the given source.
+func (sdb SourceTypesDb) GetApplicationTypes(sourceTypeId string) []ApplicationType {
 	st := sourceTypes[sourceTypeId]
 
 	var applicationTypes = make([]ApplicationType, 0, len(st.CompatibleApplicationTypes))
@@ -136,11 +136,7 @@ func (sdb SourceTypesDb) GetRandomApplicationType(sourceTypeId string) Applicati
 		applicationTypes = append(applicationTypes, appType)
 	}
 
-	// Get a random index for the array.
-	randomIdx := rand.Intn(len(applicationTypes))
-
-	// Get a random application type.
-	return applicationTypes[randomIdx]
+	return applicationTypes
 }
 
 // GetRandomSourceType returns a random source type from the database.
